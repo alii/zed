@@ -9,7 +9,7 @@ use crate::wasm_host::wit::{CompletionKind, CompletionLabelDetails, InsertTextFo
 use crate::wasm_host::{WasmState, wit::ToWasmtimeResult};
 use ::http_client::{AsyncBody, HttpRequestExt};
 use ::settings::{Settings, WorktreeId};
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context as _, Result, bail};
 use async_compression::futures::bufread::GzipDecoder;
 use async_tar::Archive;
 use async_trait::async_trait;
@@ -27,7 +27,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{Arc, OnceLock},
 };
-use util::maybe;
+use util::{archive::extract_zip, maybe};
 use wasmtime::component::{Linker, Resource};
 
 pub const MIN_VERSION: SemanticVersion = SemanticVersion::new(0, 6, 0);
@@ -524,7 +524,7 @@ impl From<http_client::HttpMethod> for ::http_client::Method {
 
 fn convert_request(
     extension_request: &http_client::HttpRequest,
-) -> Result<::http_client::Request<AsyncBody>, anyhow::Error> {
+) -> anyhow::Result<::http_client::Request<AsyncBody>> {
     let mut request = ::http_client::Request::builder()
         .method(::http_client::Method::from(extension_request.method))
         .uri(&extension_request.url)
@@ -548,7 +548,7 @@ fn convert_request(
 
 async fn convert_response(
     response: &mut ::http_client::Response<AsyncBody>,
-) -> Result<http_client::HttpResponse, anyhow::Error> {
+) -> anyhow::Result<http_client::HttpResponse> {
     let mut extension_response = http_client::HttpResponse {
         body: Vec::new(),
         headers: Vec::new(),
@@ -871,14 +871,13 @@ impl ExtensionImports for WasmState {
                 .http_client
                 .get(&url, Default::default(), true)
                 .await
-                .map_err(|err| anyhow!("error downloading release: {}", err))?;
+                .context("downloading release")?;
 
-            if !response.status().is_success() {
-                Err(anyhow!(
-                    "download failed with status {}",
-                    response.status().to_string()
-                ))?;
-            }
+            anyhow::ensure!(
+                response.status().is_success(),
+                "download failed with status {}",
+                response.status().to_string()
+            );
             let body = BufReader::new(response.body_mut());
 
             match file_type {
@@ -907,9 +906,9 @@ impl ExtensionImports for WasmState {
                 }
                 DownloadedFileType::Zip => {
                     futures::pin_mut!(body);
-                    node_runtime::extract_zip(&destination_path, body)
+                    extract_zip(&destination_path, body)
                         .await
-                        .with_context(|| format!("failed to unzip {} archive", path.display()))?;
+                        .with_context(|| format!("unzipping {path:?} archive"))?;
                 }
             }
 
@@ -931,7 +930,7 @@ impl ExtensionImports for WasmState {
             use std::os::unix::fs::PermissionsExt;
 
             return fs::set_permissions(&path, Permissions::from_mode(0o755))
-                .map_err(|error| anyhow!("failed to set permissions for path {path:?}: {error}"))
+                .with_context(|| format!("setting permissions for path {path:?}"))
                 .to_wasmtime_result();
         }
 
